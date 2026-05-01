@@ -8,6 +8,8 @@ replies with the saved path or an error, and exits.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import struct
 import sys
@@ -40,9 +42,6 @@ def load_library_dir(config_path: Path) -> Path:
 
 def default_config_path() -> Path:
     return Path.home() / ".config" / "alexandria-connector" / "config.toml"
-
-
-import hashlib
 
 
 class UnsafeFilename(Exception):
@@ -93,9 +92,6 @@ def write_pdf(library_dir: Path, filename: str, data: bytes) -> Path:
 
     target.write_bytes(data)
     return target
-
-
-import base64
 
 
 def _handle(msg: dict, config_path: Path) -> dict:
