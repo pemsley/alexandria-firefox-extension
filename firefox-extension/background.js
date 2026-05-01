@@ -51,6 +51,55 @@ browser.tabs.onRemoved.addListener((tabId) => {
   candidatesByTab.delete(tabId);
 });
 
+// PDF.js renders PDFs in a privileged chrome page where our content script
+// does not run, so we'd never get a `candidates` message for direct PDF URLs
+// or for publisher endpoints (Wiley pdfdirect, IUCr .pdf links, etc.) that
+// serve `application/pdf`. Detect those by URL pattern from the background.
+function urlLooksLikePdf(url) {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const path = u.pathname.toLowerCase();
+    if (path.endsWith(".pdf")) return true;
+    // Common publisher PDF endpoints with no .pdf suffix.
+    if (/\/pdfdirect\//.test(path)) return true;       // Wiley
+    if (/\/doi\/pdf\//.test(path)) return true;        // ACS, others
+    if (/\/articlepdf\//.test(path)) return true;      // Springer/Nature
+    if (/\/articles\/[^/]+\.pdf$/.test(path)) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function maybeMarkTabAsPdf(tabId, url) {
+  if (!urlLooksLikePdf(url)) return;
+  // Don't clobber a richer list reported by the content script.
+  const existing = candidatesByTab.get(tabId) || [];
+  if (existing.includes(url)) return;
+  if (existing.length === 0) {
+    candidatesByTab.set(tabId, [url]);
+    setButtonState(tabId, [url]);
+  }
+}
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Fires for both direct .pdf navigations and publisher PDF endpoints,
+  // including pages that PDF.js renders without running our content script.
+  if (changeInfo.url) maybeMarkTabAsPdf(tabId, changeInfo.url);
+  else if (changeInfo.status === "complete" && tab && tab.url) {
+    maybeMarkTabAsPdf(tabId, tab.url);
+  }
+});
+
+browser.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await browser.tabs.get(tabId);
+    if (tab && tab.url) maybeMarkTabAsPdf(tabId, tab.url);
+  } catch (_) { /* tab gone */ }
+});
+
 browser.browserAction.onClicked.addListener(async (tab) => {
   // Only fires when there is no popup, i.e. 0 or 1 candidates.
   const urls = candidatesByTab.get(tab.id) || [];
@@ -78,6 +127,10 @@ function basenameFromUrl(url) {
 async function saveUrl(url) {
   const resp = await fetch(url, { credentials: "include" });
   if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
+  const ctype = (resp.headers.get("content-type") || "").toLowerCase();
+  if (ctype && !ctype.includes("application/pdf") && !ctype.includes("application/octet-stream")) {
+    throw new Error(`server returned ${ctype || "unknown content-type"}, not a PDF (likely an anti-bot challenge page)`);
+  }
   const buf = await resp.arrayBuffer();
   const dataB64 = arrayBufferToBase64(buf);
   const filename = basenameFromUrl(url);
