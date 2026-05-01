@@ -57,5 +57,62 @@ class TestConfig(unittest.TestCase):
                 ac.load_library_dir(cfg)
 
 
+import hashlib
+
+
+class TestSafeFilename(unittest.TestCase):
+    def test_rejects_path_separators(self):
+        with self.assertRaises(ac.UnsafeFilename):
+            ac.safe_filename("../etc/passwd")
+        with self.assertRaises(ac.UnsafeFilename):
+            ac.safe_filename("a/b.pdf")
+
+    def test_rejects_dotfiles(self):
+        with self.assertRaises(ac.UnsafeFilename):
+            ac.safe_filename(".hidden.pdf")
+
+    def test_rejects_empty(self):
+        with self.assertRaises(ac.UnsafeFilename):
+            ac.safe_filename("")
+
+    def test_appends_pdf_extension_if_missing(self):
+        self.assertEqual(ac.safe_filename("paper"), "paper.pdf")
+
+    def test_keeps_existing_pdf_extension(self):
+        self.assertEqual(ac.safe_filename("paper.pdf"), "paper.pdf")
+
+
+class TestWriteWithCollision(unittest.TestCase):
+    def test_writes_new_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = ac.write_pdf(Path(tmp), "a.pdf", b"hello")
+            self.assertEqual(out, Path(tmp) / "a.pdf")
+            self.assertEqual(out.read_bytes(), b"hello")
+
+    def test_idempotent_on_identical_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ac.write_pdf(Path(tmp), "a.pdf", b"hello")
+            out = ac.write_pdf(Path(tmp), "a.pdf", b"hello")
+            self.assertEqual(out, Path(tmp) / "a.pdf")
+            self.assertEqual(
+                sorted(p.name for p in Path(tmp).iterdir()),
+                ["a.pdf"],
+            )
+
+    def test_appends_suffix_on_byte_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ac.write_pdf(Path(tmp), "a.pdf", b"hello")
+            out = ac.write_pdf(Path(tmp), "a.pdf", b"different")
+            self.assertEqual(out, Path(tmp) / "a-1.pdf")
+            self.assertEqual(out.read_bytes(), b"different")
+
+    def test_suffix_increments_until_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ac.write_pdf(Path(tmp), "a.pdf", b"v0")
+            ac.write_pdf(Path(tmp), "a.pdf", b"v1")  # -> a-1.pdf
+            out = ac.write_pdf(Path(tmp), "a.pdf", b"v2")
+            self.assertEqual(out, Path(tmp) / "a-2.pdf")
+
+
 if __name__ == "__main__":
     unittest.main()
