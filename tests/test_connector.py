@@ -185,5 +185,58 @@ class TestMain(unittest.TestCase):
             self.assertIn("base64", reply["error"].lower())
 
 
+import subprocess
+
+
+class TestRunAsScript(unittest.TestCase):
+    """Regression: definitions used by main() must be defined before
+    `if __name__ == "__main__"`. Importing the module hides ordering bugs;
+    only running it as a script catches them."""
+
+    def test_script_handles_save_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            lib = tmp / "lib"
+            cfg = tmp / "config.toml"
+            cfg.write_text(f'library_dir = "{lib}"\n')
+            payload = base64.b64encode(b"PDF").decode("ascii")
+            msg = json.dumps(
+                {"action": "save", "filename": "x.pdf", "data_b64": payload}
+            ).encode("utf-8")
+            stdin_bytes = struct.pack("<I", len(msg)) + msg
+
+            script = (
+                Path(__file__).resolve().parent.parent
+                / "connector"
+                / "alexandria_connector.py"
+            )
+            env = {"HOME": str(tmp), "PATH": "/usr/bin:/bin"}
+            # Override the config path by placing it where the host looks.
+            (tmp / ".config" / "alexandria-connector").mkdir(parents=True)
+            (tmp / ".config" / "alexandria-connector" / "config.toml").write_text(
+                f'library_dir = "{lib}"\n'
+            )
+            result = subprocess.run(
+                ["python3", str(script)],
+                input=stdin_bytes,
+                capture_output=True,
+                env=env,
+                timeout=10,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stderr: {result.stderr.decode(errors='replace')}",
+            )
+            out = result.stdout
+            length = int.from_bytes(out[:4], "little")
+            reply = json.loads(out[4 : 4 + length].decode("utf-8"))
+            self.assertTrue(
+                reply.get("ok"),
+                msg=f"reply: {reply}; stderr: {result.stderr.decode(errors='replace')}",
+            )
+            self.assertEqual(Path(reply["path"]).read_bytes(), b"PDF")
+
+
 if __name__ == "__main__":
     unittest.main()
