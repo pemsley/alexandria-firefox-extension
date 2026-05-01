@@ -1,0 +1,7 @@
+{
+  "name": "io.github.pemsley.alexandria",
+  "description": "Save PDFs to the Alexandria library directory",
+  "path": "@@HOST_PATH@@",
+  "type": "stdio",
+  "allowed_extensions": ["alexandria-connector@pemsley.github.io"]
+}

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Alexandria native-messaging host.
 
 Receives a single message from the Firefox extension on stdin,
