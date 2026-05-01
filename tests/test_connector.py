@@ -33,5 +33,29 @@ class TestFraming(unittest.TestCase):
         self.assertIsNone(ac.read_message(io.BytesIO(b"")))
 
 
+import tempfile
+
+
+class TestConfig(unittest.TestCase):
+    def test_load_library_dir_returns_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('library_dir = "/home/me/Papers"\n')
+            self.assertEqual(ac.load_library_dir(cfg), Path("/home/me/Papers"))
+
+    def test_load_library_dir_missing_file_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "nope.toml"
+            with self.assertRaises(ac.ConfigError):
+                ac.load_library_dir(cfg)
+
+    def test_load_library_dir_missing_key_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('other_key = "x"\n')
+            with self.assertRaises(ac.ConfigError):
+                ac.load_library_dir(cfg)
+
+
 if __name__ == "__main__":
     unittest.main()
