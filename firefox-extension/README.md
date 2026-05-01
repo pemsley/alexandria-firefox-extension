@@ -26,6 +26,10 @@ library_dir = "/home/you/Papers"
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. "Load Temporary Add-on…" and pick `firefox-extension/manifest.json`.
+3. Pin the button to the toolbar: click the puzzle-piece icon (Extensions) in
+   the toolbar, find "Save to Alexandria", and click the gear → "Pin to
+   Toolbar" (or drag it onto the toolbar via "Customize Toolbar"). Firefox
+   hides newly-installed extensions behind the puzzle-piece icon by default.
 
 The button appears in the toolbar. Greyed out = no PDF detected on the
 current page; full-colour = one PDF (click to save); badge with a
