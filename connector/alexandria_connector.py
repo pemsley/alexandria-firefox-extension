@@ -94,6 +94,50 @@ def write_pdf(library_dir: Path, filename: str, data: bytes) -> Path:
     return target
 
 
+import base64
+
+
+def _handle(msg: dict, config_path: Path) -> dict:
+    action = msg.get("action")
+    if action != "save":
+        return {"ok": False, "error": f"unknown action: {action!r}"}
+    library_dir = load_library_dir(config_path)
+    filename = safe_filename(msg.get("filename", ""))
+    try:
+        data = base64.b64decode(msg["data_b64"], validate=True)
+    except (KeyError, ValueError) as exc:
+        return {"ok": False, "error": f"bad base64 payload: {exc}"}
+    path = write_pdf(library_dir, filename, data)
+    return {"ok": True, "path": str(path)}
+
+
+def main(
+    stdin: Optional[IO[bytes]] = None,
+    stdout: Optional[IO[bytes]] = None,
+    config_path: Optional[Path] = None,
+) -> int:
+    stdin = stdin if stdin is not None else sys.stdin.buffer
+    stdout = stdout if stdout is not None else sys.stdout.buffer
+    config_path = config_path if config_path is not None else default_config_path()
+    msg = read_message(stdin)
+    if msg is None:
+        return 0
+    try:
+        reply = _handle(msg, config_path)
+    except ConfigError as exc:
+        reply = {"ok": False, "error": str(exc)}
+    except UnsafeFilename as exc:
+        reply = {"ok": False, "error": str(exc)}
+    except Exception as exc:  # last-resort: never crash the host
+        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    write_message(stdout, reply)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
 def read_message(stream: IO[bytes]) -> Optional[dict]:
     """Read one length-prefixed JSON message. Return None on EOF."""
     header = stream.read(4)

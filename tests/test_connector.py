@@ -114,5 +114,67 @@ class TestWriteWithCollision(unittest.TestCase):
             self.assertEqual(out, Path(tmp) / "a-2.pdf")
 
 
+import base64
+import struct
+
+
+class TestMain(unittest.TestCase):
+    def _run(self, msg: dict, library_dir: Path, config_path: Path) -> dict:
+        body = json.dumps(msg).encode("utf-8")
+        stdin = io.BytesIO(struct.pack("<I", len(body)) + body)
+        stdout = io.BytesIO()
+        ac.main(stdin=stdin, stdout=stdout, config_path=config_path)
+        out = stdout.getvalue()
+        length = int.from_bytes(out[:4], "little")
+        return json.loads(out[4:4 + length].decode("utf-8"))
+
+    def test_save_writes_file_and_replies_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            lib = tmp / "lib"
+            cfg = tmp / "config.toml"
+            cfg.write_text(f'library_dir = "{lib}"\n')
+            payload = base64.b64encode(b"PDF-DATA").decode("ascii")
+            reply = self._run(
+                {"action": "save", "filename": "x.pdf", "data_b64": payload},
+                lib, cfg,
+            )
+            self.assertTrue(reply["ok"])
+            self.assertEqual(Path(reply["path"]).read_bytes(), b"PDF-DATA")
+
+    def test_missing_config_yields_error_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "missing.toml"
+            payload = base64.b64encode(b"x").decode("ascii")
+            reply = self._run(
+                {"action": "save", "filename": "x.pdf", "data_b64": payload},
+                Path(tmp), cfg,
+            )
+            self.assertFalse(reply["ok"])
+            self.assertIn("config file not found", reply["error"])
+
+    def test_unknown_action_yields_error_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text(f'library_dir = "{tmp}"\n')
+            reply = self._run(
+                {"action": "frobnicate"}, Path(tmp), cfg,
+            )
+            self.assertFalse(reply["ok"])
+            self.assertIn("unknown action", reply["error"])
+
+    def test_bad_base64_yields_error_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text(f'library_dir = "{tmp}"\n')
+            reply = self._run(
+                {"action": "save", "filename": "x.pdf",
+                 "data_b64": "not!!base64!!"},
+                Path(tmp), cfg,
+            )
+            self.assertFalse(reply["ok"])
+            self.assertIn("base64", reply["error"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()
