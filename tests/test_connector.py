@@ -49,6 +49,15 @@ class TestConfig(unittest.TestCase):
             with self.assertRaises(ac.ConfigError):
                 ac.load_library_dir(cfg)
 
+    def test_load_library_dir_expands_tilde(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.toml"
+            cfg.write_text('library_dir = "~/Papers"\n')
+            self.assertEqual(
+                ac.load_library_dir(cfg),
+                Path.home() / "Papers",
+            )
+
     def test_load_library_dir_missing_key_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "config.toml"
