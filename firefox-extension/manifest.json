@@ -14,20 +14,21 @@
   "permissions": [
     "activeTab",
     "tabs",
+    "downloads",
     "nativeMessaging",
     "notifications",
     "<all_urls>"
   ],
 
   "background": {
-    "scripts": ["background.js"],
+    "scripts": ["pdf-url.js", "background.js"],
     "persistent": false
   },
 
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["pdf-url.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

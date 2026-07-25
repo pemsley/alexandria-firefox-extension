@@ -7,6 +7,9 @@ into the Alexandria library directory. Works on:
 - Publisher pages exposing `<meta name="citation_pdf_url">` (Cell,
   Nature, PLOS, Wiley, ACS, OUP, arXiv, bioRxiv, …).
 - Any page with `.pdf` links.
+- Local `file://` PDFs that Firefox downloaded (extensions can't read
+  local files, so the original URL is looked up in the download history
+  and re-fetched — a local PDF with no download record can't be saved).
 
 ## Install
 
@@ -46,6 +49,7 @@ After loading the extension, verify each row:
 | arXiv abstract page (`arxiv.org/abs/...`)          | Button active; click saves the PDF        |
 | Page with multiple `.pdf` links                    | Badge shows count; click opens picker     |
 | Page with no PDFs (e.g. google.com)                | Button greyed; click does nothing         |
+| Downloaded PDF opened as `file://` from Downloads  | Button active; click re-fetches and saves |
 | Paywalled article on a logged-in publisher domain  | PDF downloads using session cookies       |
 
 After each successful save, check that the file appears under

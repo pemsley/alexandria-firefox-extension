@@ -53,26 +53,8 @@ browser.tabs.onRemoved.addListener((tabId) => {
 
 // PDF.js renders PDFs in a privileged chrome page where our content script
 // does not run, so we'd never get a `candidates` message for direct PDF URLs
-// or for publisher endpoints (Wiley pdfdirect, IUCr .pdf links, etc.) that
-// serve `application/pdf`. Detect those by URL pattern from the background.
-function urlLooksLikePdf(url) {
-  if (!url) return false;
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-    const path = u.pathname.toLowerCase();
-    if (path.endsWith(".pdf")) return true;
-    // Common publisher PDF endpoints with no .pdf suffix.
-    if (/\/pdfdirect\//.test(path)) return true;       // Wiley
-    if (/\/doi\/pdf\//.test(path)) return true;        // ACS, others
-    if (/\/articlepdf\//.test(path)) return true;      // Springer/Nature
-    if (/\/articles\/[^/]+\.pdf$/.test(path)) return true;
-    return false;
-  } catch (_) {
-    return false;
-  }
-}
-
+// or for publisher endpoints that serve `application/pdf`. Detect those by
+// tab-URL pattern from the background, using urlLooksLikePdf() (pdf-url.js).
 function maybeMarkTabAsPdf(tabId, url) {
   if (!urlLooksLikePdf(url)) return;
   // Don't clobber a richer list reported by the content script.
@@ -124,7 +106,28 @@ function basenameFromUrl(url) {
   }
 }
 
+// Firefox 74+ forbids extensions from fetching file:// URLs, and the
+// native host is sandboxed away from ~/Downloads. So for a local PDF we
+// look up the download record that produced it and re-fetch the original
+// https URL (usually served straight from the browser cache).
+async function resolveFileUrl(fileUrl) {
+  const path = decodeURIComponent(new URL(fileUrl).pathname);
+  const items = await browser.downloads.search({ exists: true });
+  const matches = items.filter((d) => d.filename === path);
+  if (matches.length === 0) {
+    throw new Error(
+      "cannot read local files directly and no download record matches " +
+        path,
+    );
+  }
+  matches.sort((a, b) => (a.startTime < b.startTime ? 1 : -1));
+  return matches[0].finalUrl || matches[0].url;
+}
+
 async function saveUrl(url) {
+  if (new URL(url).protocol === "file:") {
+    url = await resolveFileUrl(url);
+  }
   const resp = await fetch(url, { credentials: "include" });
   if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
   const ctype = (resp.headers.get("content-type") || "").toLowerCase();

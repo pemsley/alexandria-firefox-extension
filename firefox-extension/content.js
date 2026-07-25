@@ -2,7 +2,9 @@
 // script. Three sources, in priority order:
 //   1. <meta name="citation_pdf_url"> (academic publisher convention)
 //   2. The page itself if it is a PDF
-//   3. <a href> links whose URL ends in .pdf or has .pdf? in the path
+//   3. <a href> links that look like a PDF per urlLooksLikePdf()
+//      (pdf-url.js, loaded before this file): .pdf suffix or a known
+//      publisher PDF endpoint such as Science/ACS /doi/pdf/.
 //
 // We only collect URLs. Fetching, auth, and storage live in the
 // background script and the native messaging host respectively.
@@ -27,19 +29,23 @@
   }
 
   function pdfLinkUrls() {
-    const urls = [];
+    // Keyed by origin+pathname so query-string variants of the same PDF
+    // (e.g. Science's /doi/pdf/... and /doi/pdf/...?download=true) count
+    // as one candidate, not a two-item picker.
+    const byPath = new Map();
     document.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href") || "";
-      // Match `.pdf` at end of pathname, optionally followed by ? or #.
-      if (/\.pdf(\?|#|$)/i.test(href)) {
-        try {
-          urls.push(new URL(href, document.baseURI).toString());
-        } catch (_) {
-          /* skip malformed */
-        }
+      let abs;
+      try {
+        abs = new URL(href, document.baseURI);
+      } catch (_) {
+        return; /* skip malformed */
       }
+      if (!urlLooksLikePdf(abs.toString())) return;
+      const key = abs.origin + abs.pathname;
+      if (!byPath.has(key)) byPath.set(key, abs.toString());
     });
-    return urls;
+    return Array.from(byPath.values());
   }
 
   function dedupe(urls) {
