@@ -1,6 +1,20 @@
 // State per tab: array of candidate PDF URLs reported by the content script.
 const candidatesByTab = new Map();
 
+// PDF bytes captured while the tab loaded them, keyed by tab id
+// ({url, bytes}). Publishers like ScienceDirect serve PDFs from
+// pre-signed URLs that expire within minutes and cannot be fetched a
+// second time, so saving must reuse the bytes from the original load.
+// This cache (and candidatesByTab) is why the background page is
+// persistent: an event page would drop it on suspend.
+const capturedByTab = new Map();
+
+// Keep at most this much captured PDF data across all tabs; oldest
+// captures are evicted first. A single PDF larger than the per-file
+// cap is not captured at all (saving falls back to re-fetching).
+const CAPTURE_TOTAL_LIMIT = 200 * 1024 * 1024;
+const CAPTURE_FILE_LIMIT = 100 * 1024 * 1024;
+
 const NATIVE_HOST = "io.github.pemsley.alexandria";
 const ICON_ACTIVE = "icons/alexandria-32.png";
 const ICON_INACTIVE = "icons/alexandria-32-grey.png";
@@ -40,7 +54,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   } else if (msg.type === "get-candidates") {
     return Promise.resolve(candidatesByTab.get(msg.tabId) || []);
   } else if (msg.type === "save-url") {
-    return saveUrl(msg.url).then(
+    return saveUrl(msg.url, msg.tabId).then(
       (path) => ({ ok: true, path }),
       (err) => ({ ok: false, error: String((err && err.message) || err) }),
     );
@@ -49,7 +63,63 @@ browser.runtime.onMessage.addListener((msg, sender) => {
 
 browser.tabs.onRemoved.addListener((tabId) => {
   candidatesByTab.delete(tabId);
+  capturedByTab.delete(tabId);
 });
+
+function storeCapture(tabId, url, bytes) {
+  capturedByTab.delete(tabId); // re-insert so Map order tracks recency
+  capturedByTab.set(tabId, { url, bytes });
+  let total = 0;
+  for (const { bytes: b } of capturedByTab.values()) total += b.length;
+  for (const key of capturedByTab.keys()) {
+    if (total <= CAPTURE_TOTAL_LIMIT || key === tabId) break;
+    total -= capturedByTab.get(key).bytes.length;
+    capturedByTab.delete(key);
+  }
+}
+
+// Capture PDF bytes as the tab loads them. filterResponseData() must be
+// attached in onBeforeRequest, before the content type is known, so we
+// gate on urlLooksLikePdf() and verify the %PDF magic once loaded.
+browser.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0 || !urlLooksLikePdf(details.url)) return;
+    const filter = browser.webRequest.filterResponseData(details.requestId);
+    const chunks = [];
+    let size = 0;
+    filter.ondata = (event) => {
+      filter.write(event.data); // always pass through to the page
+      if (size < 0) return; // over the cap; stop accumulating
+      size += event.data.byteLength;
+      if (size > CAPTURE_FILE_LIMIT) {
+        chunks.length = 0;
+        size = -1;
+        return;
+      }
+      chunks.push(new Uint8Array(event.data));
+    };
+    filter.onstop = () => {
+      filter.close();
+      if (size <= 0) return;
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const c of chunks) {
+        bytes.set(c, offset);
+        offset += c.length;
+      }
+      // A login or error page served on a .pdf URL is not a PDF.
+      const magic = String.fromCharCode(...bytes.subarray(0, 5));
+      if (magic !== "%PDF-") return;
+      storeCapture(details.tabId, details.url, bytes);
+      maybeMarkTabAsPdf(details.tabId, details.url);
+    };
+    filter.onerror = () => {
+      chunks.length = 0;
+    };
+  },
+  { urls: ["<all_urls>"], types: ["main_frame", "sub_frame"] },
+  ["blocking"],
+);
 
 // PDF.js renders PDFs in a privileged chrome page where our content script
 // does not run, so we'd never get a `candidates` message for direct PDF URLs
@@ -87,7 +157,7 @@ browser.browserAction.onClicked.addListener(async (tab) => {
   const urls = candidatesByTab.get(tab.id) || [];
   if (urls.length !== 1) return; // 0 → button disabled; ≥2 → popup shown
   try {
-    const path = await saveUrl(urls[0]);
+    const path = await saveUrl(urls[0], tab.id);
     notify("Saved to Alexandria", path);
   } catch (err) {
     notify("Save failed", String((err && err.message) || err));
@@ -124,24 +194,45 @@ async function resolveFileUrl(fileUrl) {
   return matches[0].finalUrl || matches[0].url;
 }
 
-async function saveUrl(url) {
+// Pre-signed URLs (ScienceDirect etc.) expire minutes after they are
+// minted; re-fetching one past its window returns an HTML error page.
+function urlIsPresigned(url) {
+  return /[?&]X-Amz-(Signature|Expires)=/i.test(url);
+}
+
+async function saveUrl(url, tabId) {
+  // Prefer the bytes captured while the tab loaded this PDF: no second
+  // download, and the only thing that works for expiring pre-signed URLs.
+  const captured = tabId !== undefined && capturedByTab.get(tabId);
+  if (captured && captured.url === url) {
+    return sendToConnector(captured.bytes, basenameFromUrl(url));
+  }
+
   if (new URL(url).protocol === "file:") {
     url = await resolveFileUrl(url);
   }
+  const expiredHint = urlIsPresigned(url)
+    ? " (this publisher's PDF links expire after a few minutes — reload the PDF page and click Save again)"
+    : "";
   const resp = await fetch(url, { credentials: "include" });
-  if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
+  if (!resp.ok) {
+    throw new Error(`fetch failed: ${resp.status} ${resp.statusText}${expiredHint}`);
+  }
   const ctype = (resp.headers.get("content-type") || "").toLowerCase();
   if (ctype && !ctype.includes("application/pdf") && !ctype.includes("application/octet-stream")) {
-    throw new Error(`server returned ${ctype || "unknown content-type"}, not a PDF (likely an anti-bot challenge page)`);
+    throw new Error(
+      `server returned ${ctype}, not a PDF${expiredHint || " (likely an anti-bot challenge page)"}`,
+    );
   }
   const buf = await resp.arrayBuffer();
-  const dataB64 = arrayBufferToBase64(buf);
-  const filename = basenameFromUrl(url);
+  return sendToConnector(new Uint8Array(buf), basenameFromUrl(url));
+}
 
+async function sendToConnector(bytes, filename) {
   const reply = await browser.runtime.sendNativeMessage(NATIVE_HOST, {
     action: "save",
     filename,
-    data_b64: dataB64,
+    data_b64: arrayBufferToBase64(bytes),
   });
   if (!reply || !reply.ok) {
     throw new Error((reply && reply.error) || "connector returned no reply");
@@ -149,9 +240,8 @@ async function saveUrl(url) {
   return reply.path;
 }
 
-function arrayBufferToBase64(buf) {
+function arrayBufferToBase64(bytes) {
   // Chunked to avoid `String.fromCharCode(... 50MB ...)` stack issues.
-  const bytes = new Uint8Array(buf);
   const CHUNK = 0x8000;
   let binary = "";
   for (let i = 0; i < bytes.length; i += CHUNK) {

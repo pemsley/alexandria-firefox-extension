@@ -17,12 +17,14 @@
     "downloads",
     "nativeMessaging",
     "notifications",
+    "webRequest",
+    "webRequestBlocking",
     "<all_urls>"
   ],
 
   "background": {
     "scripts": ["pdf-url.js", "background.js"],
-    "persistent": false
+    "persistent": true
   },
 
   "content_scripts": [

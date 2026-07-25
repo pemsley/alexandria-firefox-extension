@@ -36,6 +36,7 @@ async function init() {
     const reply = await browser.runtime.sendMessage({
       type: "save-url",
       url,
+      tabId: tab.id,
     });
     if (reply && reply.ok) {
       status.textContent = "Saved: " + reply.path;

@@ -3,7 +3,11 @@
 Adds a toolbar button that drops the article PDF on the current page
 into the Alexandria library directory. Works on:
 
-- Direct PDF URLs.
+- Direct PDF URLs, including publishers whose PDF links are pre-signed
+  and expire within minutes (e.g. ScienceDirect): the PDF bytes are
+  captured while the tab loads them, so saving never needs to re-fetch
+  an expired link. If the extension was loaded *after* the PDF, reload
+  the PDF page once so the bytes can be captured.
 - Publisher pages exposing `<meta name="citation_pdf_url">` (Cell,
   Nature, PLOS, Wiley, ACS, OUP, arXiv, bioRxiv, …).
 - Any page with `.pdf` links.
@@ -51,6 +55,7 @@ After loading the extension, verify each row:
 | Page with no PDFs (e.g. google.com)                | Button greyed; click does nothing         |
 | Downloaded PDF opened as `file://` from Downloads  | Button active; click re-fetches and saves |
 | Paywalled article on a logged-in publisher domain  | PDF downloads using session cookies       |
+| ScienceDirect PDF (expiring pre-signed URL), saved >5 min after load | Click saves from captured bytes |
 
 After each successful save, check that the file appears under
 `library_dir`. Run `alexandria-import` to ingest it as usual.
