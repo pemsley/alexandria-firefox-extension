@@ -20,14 +20,14 @@
   ],
 
   "background": {
-    "scripts": ["background.js"],
+    "scripts": ["pdf-urls.js", "background.js"],
     "persistent": false
   },
 
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["pdf-urls.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

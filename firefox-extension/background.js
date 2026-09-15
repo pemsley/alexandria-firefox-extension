@@ -38,7 +38,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     candidatesByTab.set(sender.tab.id, msg.urls || []);
     setButtonState(sender.tab.id, msg.urls || []);
   } else if (msg.type === "get-candidates") {
-    return Promise.resolve(candidatesByTab.get(msg.tabId) || []);
+    return candidatesFor(msg.tabId);
   } else if (msg.type === "save-url") {
     return saveUrl(msg.url).then(
       (path) => ({ ok: true, path }),
@@ -53,24 +53,11 @@ browser.tabs.onRemoved.addListener((tabId) => {
 
 // PDF.js renders PDFs in a privileged chrome page where our content script
 // does not run, so we'd never get a `candidates` message for direct PDF URLs
-// or for publisher endpoints (Wiley pdfdirect, IUCr .pdf links, etc.) that
-// serve `application/pdf`. Detect those by URL pattern from the background.
+// or for publisher endpoints (Wiley pdfdirect, Silverchair article-pdf, IUCr
+// .pdf links, etc.) that serve `application/pdf`. Detect those by URL pattern
+// from the background, using the same matcher the content script uses.
 function urlLooksLikePdf(url) {
-  if (!url) return false;
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-    const path = u.pathname.toLowerCase();
-    if (path.endsWith(".pdf")) return true;
-    // Common publisher PDF endpoints with no .pdf suffix.
-    if (/\/pdfdirect\//.test(path)) return true;       // Wiley
-    if (/\/doi\/pdf\//.test(path)) return true;        // ACS, others
-    if (/\/articlepdf\//.test(path)) return true;      // Springer/Nature
-    if (/\/articles\/[^/]+\.pdf$/.test(path)) return true;
-    return false;
-  } catch (_) {
-    return false;
-  }
+  return AlexandriaPdf.looksLikePdfUrl(url);
 }
 
 function maybeMarkTabAsPdf(tabId, url) {
@@ -100,10 +87,61 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   } catch (_) { /* tab gone */ }
 });
 
+// This is a non-persistent background page, so `candidatesByTab` is lost
+// every time Firefox unloads us for being idle -- which, on a page you spend
+// a few minutes reading, is most of the time you might click the button. The
+// per-tab icon and popup settings are held by the browser and survive, so the
+// button still looks armed while our side of the state has gone. Ask the
+// content script, which is still alive in the page, rather than concluding
+// the page has no PDF.
+async function candidatesFor(tabId) {
+  const cached = candidatesByTab.get(tabId) || [];
+  if (cached.length > 0) return cached;
+  let urls = await askTab(tabId);
+  if (urls === null) {
+    // Nothing answered. Tabs that were already open when the add-on was
+    // loaded have no content script -- the usual case when running this as a
+    // temporary add-on from about:debugging -- so inject one and ask again.
+    try {
+      await browser.tabs.executeScript(tabId, { file: "pdf-urls.js" });
+      await browser.tabs.executeScript(tabId, { file: "content.js" });
+      urls = await askTab(tabId);
+    } catch (_) {
+      // A PDF.js view or a page we are not allowed to inject into.
+      // `maybeMarkTabAsPdf` covers the first case.
+    }
+  }
+  if (urls && urls.length > 0) {
+    candidatesByTab.set(tabId, urls);
+    setButtonState(tabId, urls);
+    return urls;
+  }
+  return cached;
+}
+
+// Returns the tab's candidates, or null if no content script answered.
+async function askTab(tabId) {
+  try {
+    return await browser.tabs.sendMessage(tabId, { type: "rescan" });
+  } catch (_) {
+    return null;
+  }
+}
+
 browser.browserAction.onClicked.addListener(async (tab) => {
-  // Only fires when there is no popup, i.e. 0 or 1 candidates.
-  const urls = candidatesByTab.get(tab.id) || [];
-  if (urls.length !== 1) return; // 0 → button disabled; ≥2 → popup shown
+  // Only fires when there is no popup, i.e. 0 or 1 candidates were known
+  // when the button state was last set.
+  const urls = await candidatesFor(tab.id);
+  if (urls.length === 0) {
+    notify("Save to Alexandria", "No PDF found on this page.");
+    return;
+  }
+  if (urls.length > 1) {
+    // A rescan turned up more than we knew about; setButtonState has just
+    // installed the popup, so the next click will offer the choice.
+    notify("Save to Alexandria", `${urls.length} PDFs found — click again to choose.`);
+    return;
+  }
   try {
     const path = await saveUrl(urls[0]);
     notify("Saved to Alexandria", path);
