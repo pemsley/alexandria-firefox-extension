@@ -15,25 +15,43 @@ var AlexandriaPdf = (function () {
     /\/article-pdf\//,   // Silverchair: ACS (2026 platform), OUP
     /\/articlepdf\//,    // Springer Nature
     /\/doi\/pdf\//,      // ACS (legacy), Taylor & Francis, SAGE, Royal Society
-    /\/doi\/epdf\//,     // Wiley / ACS inline reader
     /\/pdfdirect\//,     // Wiley
+    /\/stamppdf\//,      // IEEE Xplore (the file behind stamp.jsp)
     /\/content\/pdf\//,  // Springer
     /\/pdf\/[^/]+v\d+$/, // arXiv (/pdf/2401.01234v1)
   ];
 
-  function looksLikePdfUrl(url) {
-    if (!url) return false;
-    let u;
+  // Pages that are not a PDF themselves but wrap one in a viewer. Fetching one
+  // yields HTML; the file is behind an <iframe>/<embed> inside it. Worth
+  // offering as a candidate, because for some publishers it is the only link
+  // on the article page.
+  const VIEWER_PATTERNS = [
+    /^\/stamp\/stamp\.jsp$/, // IEEE Xplore
+    /\/doi\/epdf\//,          // Wiley's reader
+  ];
+
+  function pathOf(url) {
     try {
-      u = new URL(url);
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      return u.pathname.toLowerCase();
     } catch (_) {
-      return false;
+      return null;
     }
-    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-    const path = u.pathname.toLowerCase();
+  }
+
+  function looksLikePdfUrl(url) {
+    const path = pathOf(url);
+    if (path === null) return false;
     if (path.endsWith(".pdf")) return true;
     return ENDPOINT_PATTERNS.some((re) => re.test(path));
   }
 
-  return { looksLikePdfUrl };
+  function looksLikePdfViewerUrl(url) {
+    const path = pathOf(url);
+    if (path === null) return false;
+    return VIEWER_PATTERNS.some((re) => re.test(path));
+  }
+
+  return { looksLikePdfUrl, looksLikePdfViewerUrl };
 })();

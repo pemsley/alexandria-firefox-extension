@@ -1,9 +1,12 @@
 // Find candidate PDF URLs on this page and send them to the background
-// script. Four sources, in priority order:
+// script. Six sources, in priority order:
 //   1. <meta name="citation_pdf_url"> (academic publisher convention)
 //   2. The page itself if it is a PDF
 //   3. The publisher's "PDF" button
 //   4. <a href> links that look like a PDF URL
+//   5. A PDF embedded in this page with <iframe>/<embed>/<object>
+//   6. Links to a viewer page that wraps a PDF (IEEE's stamp.jsp). Last,
+//      because the background has to fetch and unwrap one of these.
 //
 // We only collect URLs. Fetching, auth, and storage live in the
 // background script and the native messaging host respectively.
@@ -71,6 +74,27 @@
     return urls;
   }
 
+  function embeddedPdfUrls() {
+    const urls = [];
+    document
+      .querySelectorAll("iframe[src], embed[src], object[data]")
+      .forEach((el) => {
+        const raw = el.getAttribute("src") || el.getAttribute("data") || "";
+        const v = absolute(raw);
+        if (v && AlexandriaPdf.looksLikePdfUrl(v)) urls.push(v);
+      });
+    return urls;
+  }
+
+  function pdfViewerUrls() {
+    const urls = [];
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const v = absolute(a.getAttribute("href") || "");
+      if (v && AlexandriaPdf.looksLikePdfViewerUrl(v)) urls.push(v);
+    });
+    return urls;
+  }
+
   function scan() {
     return Array.from(
       new Set([
@@ -78,6 +102,8 @@
         ...pageIsPdfUrl(),
         ...pdfButtonUrls(),
         ...pdfLinkUrls(),
+        ...embeddedPdfUrls(),
+        ...pdfViewerUrls(),
       ]),
     );
   }

@@ -242,6 +242,76 @@ function humanBytes(n) {
   return `${n}B`;
 }
 
+async function fetchPdf(url) {
+  const resp = await fetch(url, { credentials: "include" });
+  if (!resp.ok) {
+    throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
+  }
+  const ctype = (resp.headers.get("content-type") || "").toLowerCase();
+  const ok =
+    !ctype ||
+    ctype.includes("application/pdf") ||
+    ctype.includes("application/octet-stream") ||
+    isHtmlType(ctype);
+  if (!ok) {
+    throw new Error(`server returned ${ctype}, not a PDF`);
+  }
+  return resp;
+}
+
+function isHtmlType(ctype) {
+  return ctype.includes("text/html") || ctype.includes("application/xhtml");
+}
+
+function isHtml(resp) {
+  return isHtmlType((resp.headers.get("content-type") || "").toLowerCase());
+}
+
+// Look for a PDF embedded in a viewer page. Prefer a source we recognise as a
+// PDF; failing that, a lone frame is worth trying, since the content-type
+// check on the next fetch will reject it if it is more HTML.
+function embeddedPdfUrl(html, baseUrl) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const sources = [];
+  doc.querySelectorAll("iframe[src], embed[src], object[data]").forEach((el) => {
+    const raw = el.getAttribute("src") || el.getAttribute("data") || "";
+    try {
+      const abs = new URL(raw, baseUrl).toString();
+      const u = new URL(abs);
+      if (u.protocol === "http:" || u.protocol === "https:") sources.push(abs);
+    } catch (_) {
+      /* skip malformed */
+    }
+  });
+  const known = sources.find((u) => AlexandriaPdf.looksLikePdfUrl(u));
+  if (known) return known;
+  return sources.length === 1 ? sources[0] : null;
+}
+
+// `Content-Disposition` is the only decent name for the query-string URLs
+// these viewers redirect to -- the path would give us "getPDF.jsp".
+function filenameFor(resp, url) {
+  const cd = resp.headers.get("content-disposition") || "";
+  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(cd);
+  const plain = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/.exec(cd);
+  let name = null;
+  if (star) {
+    try {
+      name = decodeURIComponent(star[1].trim());
+    } catch (_) {
+      name = star[1].trim();
+    }
+  } else if (plain) {
+    name = (plain[1] || plain[2] || "").trim();
+  }
+  if (name) {
+    name = name.replace(/[/\\]/g, "_");
+    if (!/\.pdf$/i.test(name)) name += ".pdf";
+    return name;
+  }
+  return basenameFromUrl(url);
+}
+
 function basenameFromUrl(url) {
   try {
     const u = new URL(url);
@@ -255,11 +325,23 @@ function basenameFromUrl(url) {
 }
 
 async function saveUrl(url, onProgress) {
-  const resp = await fetch(url, { credentials: "include" });
-  if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
-  const ctype = (resp.headers.get("content-type") || "").toLowerCase();
-  if (ctype && !ctype.includes("application/pdf") && !ctype.includes("application/octet-stream")) {
-    throw new Error(`server returned ${ctype || "unknown content-type"}, not a PDF (likely an anti-bot challenge page)`);
+  let resp = await fetchPdf(url);
+  // Some publishers hand back a viewer page rather than the file: IEEE
+  // Xplore's stamp.jsp is an HTML shell whose <iframe> holds the real PDF.
+  // Follow that one level before giving up.
+  if (isHtml(resp)) {
+    const inner = await embeddedPdfUrl(await resp.text(), resp.url || url);
+    if (!inner) {
+      throw new Error(
+        "server returned HTML, not a PDF (an anti-bot challenge page, or a " +
+          "viewer we could not see into)",
+      );
+    }
+    resp = await fetchPdf(inner);
+    if (isHtml(resp)) {
+      throw new Error("viewer page did not lead to a PDF");
+    }
+    url = inner;
   }
   // Content-Length is absent on chunked responses; callers cope with total 0.
   const total = Number(resp.headers.get("content-length")) || 0;
@@ -268,7 +350,7 @@ async function saveUrl(url, onProgress) {
     onProgress({ phase: "saving", received: bytes.length, total });
   }
   const dataB64 = bytesToBase64(bytes);
-  const filename = basenameFromUrl(url);
+  const filename = filenameFor(resp, url);
 
   const reply = await browser.runtime.sendNativeMessage(NATIVE_HOST, {
     action: "save",
