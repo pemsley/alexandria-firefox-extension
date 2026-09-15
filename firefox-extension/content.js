@@ -1,11 +1,13 @@
 // Find candidate PDF URLs on this page and send them to the background
-// script. Six sources, in priority order:
+// script. Seven sources, in priority order:
 //   1. <meta name="citation_pdf_url"> (academic publisher convention)
 //   2. The page itself if it is a PDF
 //   3. The publisher's "PDF" button
-//   4. <a href> links that look like a PDF URL
-//   5. A PDF embedded in this page with <iframe>/<embed>/<object>
-//   6. Links to a viewer page that wraps a PDF (IEEE's stamp.jsp). Last,
+//   4. This article's own PDF endpoint, where the publisher also lists one
+//      per bibliography entry (ScienceDirect's /pdfft)
+//   5. <a href> links that look like a PDF URL
+//   6. A PDF embedded in this page with <iframe>/<embed>/<object>
+//   7. Links to a viewer page that wraps a PDF (IEEE's stamp.jsp). Last,
 //      because the background has to fetch and unwrap one of these.
 //
 // We only collect URLs. Fetching, auth, and storage live in the
@@ -65,6 +67,41 @@
     return urls;
   }
 
+  // Publishers list a PDF link for every reference as well as for the article
+  // itself, so those endpoints are only safe to offer when the link names this
+  // article. Identify it from the publisher's own id metas, falling back to
+  // the last segment of the page's path.
+  function articleIds() {
+    const ids = [];
+    ["citation_pii", "citation_doi"].forEach((name) => {
+      const m = document.querySelector(`meta[name="${name}"]`);
+      const v = m ? (m.getAttribute("content") || "").trim() : "";
+      if (v) ids.push(v);
+    });
+    const segments = window.location.pathname.split("/").filter(Boolean);
+    if (segments.length) {
+      try {
+        ids.push(decodeURIComponent(segments[segments.length - 1]));
+      } catch (_) {
+        ids.push(segments[segments.length - 1]);
+      }
+    }
+    return ids;
+  }
+
+  function ownArticlePdfUrls() {
+    const ids = articleIds();
+    if (ids.length === 0) return [];
+    const urls = [];
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const v = absolute(a.getAttribute("href") || "");
+      if (!v || !AlexandriaPdf.looksLikeReferencePdfUrl(v)) return;
+      const path = new URL(v).pathname;
+      if (ids.some((id) => path.includes(id))) urls.push(v);
+    });
+    return urls;
+  }
+
   function pdfLinkUrls() {
     const urls = [];
     document.querySelectorAll("a[href]").forEach((a) => {
@@ -101,6 +138,7 @@
         ...citationPdfUrls(),
         ...pageIsPdfUrl(),
         ...pdfButtonUrls(),
+        ...ownArticlePdfUrls(),
         ...pdfLinkUrls(),
         ...embeddedPdfUrls(),
         ...pdfViewerUrls(),

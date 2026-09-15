@@ -288,8 +288,11 @@ function embeddedPdfUrl(html, baseUrl) {
   return sources.length === 1 ? sources[0] : null;
 }
 
-// `Content-Disposition` is the only decent name for the query-string URLs
-// these viewers redirect to -- the path would give us "getPDF.jsp".
+// Naming, best source first. The requested path is often useless here: IEEE's
+// is "getPDF.jsp", ScienceDirect's is "pdfft", and the URL it redirects to is
+// a generic "main.pdf" that would collide across every Elsevier paper. A query
+// parameter ending in .pdf is usually the publisher's own name for the file
+// (ScienceDirect passes `pid=1-s2.0-S0021925817473893-main.pdf`).
 function filenameFor(resp, url) {
   const cd = resp.headers.get("content-disposition") || "";
   const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(cd);
@@ -304,12 +307,29 @@ function filenameFor(resp, url) {
   } else if (plain) {
     name = (plain[1] || plain[2] || "").trim();
   }
+  if (!name) name = pdfNameFromQuery(url);
   if (name) {
     name = name.replace(/[/\\]/g, "_");
     if (!/\.pdf$/i.test(name)) name += ".pdf";
     return name;
   }
+  // `resp.url` is where we ended up after any redirects, which is more likely
+  // to name the file than the endpoint we asked for.
+  const final = resp.url && resp.url !== url ? basenameFromUrl(resp.url) : null;
+  if (final && final !== "download.pdf") return final;
   return basenameFromUrl(url);
+}
+
+function pdfNameFromQuery(url) {
+  try {
+    for (const value of new URL(url).searchParams.values()) {
+      const v = value.trim();
+      if (/\.pdf$/i.test(v) && !v.includes("/")) return v;
+    }
+  } catch (_) {
+    /* not a URL we can parse */
+  }
+  return null;
 }
 
 function basenameFromUrl(url) {

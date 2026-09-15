@@ -30,6 +30,14 @@ var AlexandriaPdf = (function () {
     /\/doi\/epdf\//,          // Wiley's reader
   ];
 
+  // Endpoints a page lists once per bibliography entry as well as for the
+  // article itself -- one ScienceDirect page carries 22 of them. Offered only
+  // when the link also names this article, so they are kept out of
+  // ENDPOINT_PATTERNS and matched separately.
+  const REFERENCE_PATTERNS = [
+    /\/pdfft$/, // ScienceDirect: /science/article/pii/<pii>/pdfft
+  ];
+
   function pathOf(url) {
     try {
       const u = new URL(url);
@@ -53,5 +61,11 @@ var AlexandriaPdf = (function () {
     return VIEWER_PATTERNS.some((re) => re.test(path));
   }
 
-  return { looksLikePdfUrl, looksLikePdfViewerUrl };
+  function looksLikeReferencePdfUrl(url) {
+    const path = pathOf(url);
+    if (path === null) return false;
+    return REFERENCE_PATTERNS.some((re) => re.test(path));
+  }
+
+  return { looksLikePdfUrl, looksLikePdfViewerUrl, looksLikeReferencePdfUrl };
 })();
