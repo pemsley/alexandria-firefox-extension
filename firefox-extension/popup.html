@@ -42,12 +42,33 @@
       .status.error {
         color: #a00;
       }
+      .progress {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      /* A <progress> with no value renders as an indeterminate animation,
+         which is what tells "waiting on the server" from "downloading". */
+      .progress progress {
+        flex: 1;
+        height: 8px;
+      }
+      .progress .detail {
+        color: #555;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
     <h1>Save to Alexandria</h1>
     <ul id="list"></ul>
     <div class="status" id="status"></div>
+    <div class="progress" id="progress" hidden>
+      <progress id="bar" max="100"></progress>
+      <span class="detail" id="detail"></span>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>

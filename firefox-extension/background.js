@@ -40,10 +40,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   } else if (msg.type === "get-candidates") {
     return candidatesFor(msg.tabId);
   } else if (msg.type === "save-url") {
-    return saveUrl(msg.url).then(
-      (path) => ({ ok: true, path }),
-      (err) => ({ ok: false, error: String((err && err.message) || err) }),
-    );
+    return saveWithProgress(msg.url, msg.tabId);
   }
 });
 
@@ -142,13 +139,108 @@ browser.browserAction.onClicked.addListener(async (tab) => {
     notify("Save to Alexandria", `${urls.length} PDFs found — click again to choose.`);
     return;
   }
-  try {
-    const path = await saveUrl(urls[0]);
-    notify("Saved to Alexandria", path);
-  } catch (err) {
-    notify("Save failed", String((err && err.message) || err));
+  const result = await saveWithProgress(urls[0], tab.id, urls);
+  if (result.ok) {
+    notify("Saved to Alexandria", result.path);
+  } else {
+    notify("Save failed", result.error);
   }
 });
+
+// A click can sit for half a minute on a slow publisher, and the button used
+// to look identical whether we were still waiting on the server or were most
+// of the way through a large PDF. Drive the badge from the transfer instead:
+// animated dots while waiting, a percentage once bytes are arriving.
+//
+// `knownUrls` is what the button goes back to showing once the transfer ends.
+// Take it from the caller, which knows what it offered, rather than re-reading
+// `candidatesByTab` and risking the two disagreeing.
+async function saveWithProgress(url, tabId, knownUrls) {
+  const restoreTo = knownUrls || candidatesByTab.get(tabId) || [];
+  const indicator = tabId == null ? null : progressIndicator(tabId);
+  try {
+    const path = await saveUrl(url, (p) => {
+      if (indicator) indicator.update(p);
+      // The popup shows the same progress; it may not be open.
+      browser.runtime
+        .sendMessage({ type: "save-progress", progress: p })
+        .catch(() => {});
+    });
+    return { ok: true, path };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    if (indicator) {
+      indicator.stop();
+      setButtonState(tabId, restoreTo);
+    }
+  }
+}
+
+const PROGRESS_COLOUR = "#c80";
+
+function progressIndicator(tabId) {
+  let timer = null;
+  let downloading = false;
+
+  const badge = (text) => browser.browserAction.setBadgeText({ tabId, text });
+  const title = (t) => browser.browserAction.setTitle({ tabId, title: t });
+
+  function dots(label) {
+    stopDots();
+    let n = 0;
+    badge(".");
+    title(label);
+    timer = setInterval(() => {
+      n = (n + 1) % 3;
+      badge(".".repeat(n + 1));
+    }, 400);
+  }
+
+  function stopDots() {
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  browser.browserAction.setBadgeBackgroundColor({
+    tabId,
+    color: PROGRESS_COLOUR,
+  });
+  dots("Alexandria: contacting server…");
+
+  return {
+    update(p) {
+      if (p.phase === "downloading") {
+        if (!downloading) {
+          downloading = true;
+          stopDots();
+        }
+        if (p.total > 0) {
+          const pct = Math.min(99, Math.floor((p.received / p.total) * 100));
+          badge(`${pct}%`);
+          title(`Alexandria: downloading ${pct}% of ${humanBytes(p.total)}`);
+        } else {
+          badge(humanBytes(p.received));
+          title(`Alexandria: downloaded ${humanBytes(p.received)}`);
+        }
+      } else if (p.phase === "saving") {
+        downloading = false;
+        dots("Alexandria: writing to the library…");
+      }
+    },
+    stop: stopDots,
+  };
+}
+
+// Badge text only has room for about four characters.
+function humanBytes(n) {
+  if (n >= 10485760) return `${Math.round(n / 1048576)}M`;
+  if (n >= 1048576) return `${(n / 1048576).toFixed(1)}M`;
+  if (n >= 1024) return `${Math.round(n / 1024)}K`;
+  return `${n}B`;
+}
 
 function basenameFromUrl(url) {
   try {
@@ -162,15 +254,20 @@ function basenameFromUrl(url) {
   }
 }
 
-async function saveUrl(url) {
+async function saveUrl(url, onProgress) {
   const resp = await fetch(url, { credentials: "include" });
   if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
   const ctype = (resp.headers.get("content-type") || "").toLowerCase();
   if (ctype && !ctype.includes("application/pdf") && !ctype.includes("application/octet-stream")) {
     throw new Error(`server returned ${ctype || "unknown content-type"}, not a PDF (likely an anti-bot challenge page)`);
   }
-  const buf = await resp.arrayBuffer();
-  const dataB64 = arrayBufferToBase64(buf);
+  // Content-Length is absent on chunked responses; callers cope with total 0.
+  const total = Number(resp.headers.get("content-length")) || 0;
+  const bytes = await readBody(resp, total, onProgress);
+  if (onProgress) {
+    onProgress({ phase: "saving", received: bytes.length, total });
+  }
+  const dataB64 = bytesToBase64(bytes);
   const filename = basenameFromUrl(url);
 
   const reply = await browser.runtime.sendNativeMessage(NATIVE_HOST, {
@@ -184,9 +281,42 @@ async function saveUrl(url) {
   return reply.path;
 }
 
-function arrayBufferToBase64(buf) {
+// Read the body a chunk at a time rather than with `resp.arrayBuffer()`, so
+// there is something to report while a large PDF comes down. Progress is
+// throttled: a fast transfer yields hundreds of chunks a second and the badge
+// cannot usefully show that.
+async function readBody(resp, total, onProgress) {
+  if (!resp.body || typeof resp.body.getReader !== "function") {
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  let lastReport = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const now = Date.now();
+    if (onProgress && now - lastReport >= 100) {
+      lastReport = now;
+      onProgress({ phase: "downloading", received, total });
+    }
+  }
+  if (onProgress) onProgress({ phase: "downloading", received, total });
+
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function bytesToBase64(bytes) {
   // Chunked to avoid `String.fromCharCode(... 50MB ...)` stack issues.
-  const bytes = new Uint8Array(buf);
   const CHUNK = 0x8000;
   let binary = "";
   for (let i = 0; i < bytes.length; i += CHUNK) {
