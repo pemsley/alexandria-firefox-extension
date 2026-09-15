@@ -11,15 +11,29 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import struct
 import sys
 from pathlib import Path
 from typing import IO, Optional
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover - 3.9/3.10
-    import tomli as tomllib  # type: ignore[no-redef]
+# We deliberately avoid `tomllib` (Python 3.11+) so the connector can run
+# on the system Python 3 that macOS ships (currently 3.9). The config has
+# exactly one key; a single regex matches everything we need.
+_LIBRARY_DIR_RE = re.compile(
+    r'^\s*library_dir\s*=\s*(?:"([^"]*)"|\'([^\']*)\')\s*(?:#.*)?$'
+)
+
+
+def _parse_library_dir(text: str) -> Optional[str]:
+    """Return the `library_dir` value from a minimal-TOML config, or None
+    if absent. Accepts double- or single-quoted strings; ignores comments
+    and blank lines."""
+    for line in text.splitlines():
+        m = _LIBRARY_DIR_RE.match(line)
+        if m:
+            return m.group(1) if m.group(1) is not None else m.group(2)
+    return None
 
 
 def read_message(stream: IO[bytes]) -> Optional[dict]:
@@ -55,11 +69,11 @@ def load_library_dir(config_path: Path) -> Path:
             f"config file not found: {config_path} "
             "(create it with: library_dir = \"/path/to/your/papers\")"
         )
-    with config_path.open("rb") as fh:
-        data = tomllib.load(fh)
-    if "library_dir" not in data:
+    text = config_path.read_text(encoding="utf-8")
+    value = _parse_library_dir(text)
+    if value is None:
         raise ConfigError(f"`library_dir` missing from {config_path}")
-    return Path(data["library_dir"]).expanduser()
+    return Path(value).expanduser()
 
 
 def default_config_path() -> Path:

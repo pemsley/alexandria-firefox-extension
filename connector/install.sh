@@ -34,16 +34,24 @@ if [ ! -f "$SOURCE_SCRIPT" ] || [ ! -f "$MANIFEST_TEMPLATE" ]; then
     exit 1
 fi
 
-# Sanity-check Python. tomllib lives in 3.11+, so insist on that.
+# Sanity-check Python. The connector parses its own config rather than using
+# `tomllib`, precisely so it runs under the Python 3 that macOS ships, so 3.8
+# is enough.
+#
+# Note this checks the python3 on *your* $PATH. Firefox launches the connector
+# via its `#!/usr/bin/env python3` shebang with the PATH it inherits from the
+# session -- on macOS, launchd's, which is typically just /usr/bin:/bin and so
+# finds the system Python, not a Homebrew one. Keeping the floor low is what
+# makes that difference harmless.
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "error: python3 is not on \$PATH; please install Python 3.11 or newer" >&2
+    echo "error: python3 is not on \$PATH; please install Python 3.8 or newer" >&2
     exit 1
 fi
 PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 PYMAJ="$(echo "$PYVER" | cut -d. -f1)"
 PYMIN="$(echo "$PYVER" | cut -d. -f2)"
-if [ "$PYMAJ" -lt 3 ] || { [ "$PYMAJ" -eq 3 ] && [ "$PYMIN" -lt 11 ]; }; then
-    echo "error: Python 3.11 or newer required (found $PYVER)" >&2
+if [ "$PYMAJ" -lt 3 ] || { [ "$PYMAJ" -eq 3 ] && [ "$PYMIN" -lt 8 ]; }; then
+    echo "error: Python 3.8 or newer required (found $PYVER)" >&2
     exit 1
 fi
 
@@ -53,15 +61,12 @@ echo
 # Ask for library_dir, but only if no existing config has one already.
 existing_dir=""
 if [ -f "$CONFIG_PATH" ]; then
-    existing_dir="$(python3 -c '
-import sys, tomllib
-try:
-    with open(sys.argv[1], "rb") as fh:
-        data = tomllib.load(fh)
-    print(data.get("library_dir", ""))
-except Exception:
-    pass
-' "$CONFIG_PATH" 2>/dev/null || true)"
+    # Matches the connector's own minimal-TOML parse: a single `library_dir`
+    # key, double- or single-quoted.
+    existing_dir="$(sed -n \
+        -e 's/^[[:space:]]*library_dir[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        -e "s/^[[:space:]]*library_dir[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" \
+        "$CONFIG_PATH" 2>/dev/null | head -n 1)"
 fi
 
 if [ -n "$existing_dir" ]; then
