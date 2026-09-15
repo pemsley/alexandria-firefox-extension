@@ -20,7 +20,7 @@ function setButtonState(tabId, urls) {
     tabId,
     title:
       count === 0
-        ? "Save to Alexandria (no PDF detected)"
+        ? "Alexandria connector: No PDF detected"
         : count === 1
         ? "Save to Alexandria"
         : `Save to Alexandria (${count} PDFs found)`,
@@ -133,7 +133,7 @@ browser.browserAction.onClicked.addListener(async (tab) => {
   // when the button state was last set.
   const urls = await candidatesFor(tab.id);
   if (urls.length === 0) {
-    notify("Save to Alexandria", "No PDF found on this page.");
+    notify("Alexandria connector", "No PDF detected on this page.");
     return;
   }
   if (urls.length > 1) {

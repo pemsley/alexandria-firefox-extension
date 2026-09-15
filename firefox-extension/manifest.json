@@ -34,7 +34,7 @@
   ],
 
   "browser_action": {
-    "default_title": "Save to Alexandria",
+    "default_title": "Alexandria connector: No PDF detected",
     "default_icon": {
       "32": "icons/alexandria-32-grey.png"
     },
