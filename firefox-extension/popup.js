@@ -14,19 +14,29 @@ async function init() {
     status.textContent = "No PDFs detected on this page.";
     return;
   }
-  for (const url of urls) {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    let label;
+  // Mirror the naming the background uses when it saves, so the button says
+  // what you will get. The path is no help for these endpoints: ScienceDirect
+  // would label its article PDF "pdfft", right beside a supplementary file
+  // showing its real name.
+  function labelFor(url) {
     try {
       const u = new URL(url);
-      label = decodeURIComponent(
+      for (const value of u.searchParams.values()) {
+        const v = value.trim();
+        if (/\.pdf$/i.test(v) && !v.includes("/")) return v;
+      }
+      return decodeURIComponent(
         u.pathname.split("/").filter(Boolean).pop() || u.href,
       );
     } catch (_) {
-      label = url;
+      return url;
     }
-    btn.textContent = label;
+  }
+
+  for (const url of urls) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.textContent = labelFor(url);
     btn.title = url;
     btn.addEventListener("click", () => save(url));
     li.appendChild(btn);
@@ -73,8 +83,14 @@ async function init() {
     });
     progress.hidden = true;
     if (reply && reply.ok) {
-      status.textContent = "Saved: " + reply.path;
-      setTimeout(() => window.close(), 800);
+      // Deliberately no auto-close: the saved path is the one thing worth
+      // reading here, and it is often long. Dismiss with Esc or by clicking
+      // away.
+      status.textContent = "Saved to:";
+      const path = document.createElement("div");
+      path.className = "saved-path";
+      path.textContent = reply.path;
+      status.appendChild(path);
     } else {
       status.classList.add("error");
       status.textContent =
