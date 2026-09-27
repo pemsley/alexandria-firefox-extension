@@ -9,6 +9,9 @@
 //   6. A PDF embedded in this page with <iframe>/<embed>/<object>
 //   7. Links to a viewer page that wraps a PDF (IEEE's stamp.jsp). Last,
 //      because the background has to fetch and unwrap one of these.
+// Every URL goes through canonicalPdfUrl() (pdf-url.js, loaded before this
+// file) first, so publisher URLs that serve an HTML wrapper or reader (Wiley
+// /doi/pdf/, /doi/epdf/) become the URL that serves the PDF itself.
 //
 // We only collect URLs. Fetching, auth, and storage live in the
 // background script and the native messaging host respectively.
@@ -34,7 +37,7 @@
     try {
       const u = new URL(href, document.baseURI);
       if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-      return u.toString();
+      return canonicalPdfUrl(u.toString());
     } catch (_) {
       return null;
     }
@@ -95,7 +98,7 @@
     const urls = [];
     document.querySelectorAll("a[href]").forEach((a) => {
       const v = absolute(a.getAttribute("href") || "");
-      if (!v || !AlexandriaPdf.looksLikeReferencePdfUrl(v)) return;
+      if (!v || !urlLooksLikeReferencePdf(v)) return;
       const path = new URL(v).pathname;
       if (ids.some((id) => path.includes(id))) urls.push(v);
     });
@@ -103,12 +106,18 @@
   }
 
   function pdfLinkUrls() {
-    const urls = [];
+    // Keyed by origin+pathname so query-string variants of the same PDF
+    // (e.g. Science's /doi/pdf/... and /doi/pdf/...?download=true) count
+    // as one candidate, not a two-item picker.
+    const byPath = new Map();
     document.querySelectorAll("a[href]").forEach((a) => {
       const v = absolute(a.getAttribute("href") || "");
-      if (v && AlexandriaPdf.looksLikePdfUrl(v)) urls.push(v);
+      if (!v || !urlLooksLikePdf(v)) return;
+      const u = new URL(v);
+      const key = u.origin + u.pathname;
+      if (!byPath.has(key)) byPath.set(key, v);
     });
-    return urls;
+    return Array.from(byPath.values());
   }
 
   function embeddedPdfUrls() {
@@ -118,7 +127,7 @@
       .forEach((el) => {
         const raw = el.getAttribute("src") || el.getAttribute("data") || "";
         const v = absolute(raw);
-        if (v && AlexandriaPdf.looksLikePdfUrl(v)) urls.push(v);
+        if (v && urlLooksLikePdf(v)) urls.push(v);
       });
     return urls;
   }
@@ -127,7 +136,7 @@
     const urls = [];
     document.querySelectorAll("a[href]").forEach((a) => {
       const v = absolute(a.getAttribute("href") || "");
-      if (v && AlexandriaPdf.looksLikePdfViewerUrl(v)) urls.push(v);
+      if (v && urlLooksLikePdfViewer(v)) urls.push(v);
     });
     return urls;
   }
@@ -156,9 +165,9 @@
     browser.runtime.sendMessage({ type: "candidates", urls: candidates });
   }
 
-  // The background is an event page: it is unloaded when idle, taking its
-  // record of this tab's candidates with it. This content script stays alive
-  // in the page, so it can answer when the background asks again.
+  // The background can lose its record of this tab's candidates (the add-on
+  // reloaded, say). This content script stays alive in the page, so it can
+  // answer when the background asks again.
   browser.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === "rescan") return Promise.resolve(scan());
   });

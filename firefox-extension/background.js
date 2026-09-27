@@ -1,6 +1,20 @@
 // State per tab: array of candidate PDF URLs reported by the content script.
 const candidatesByTab = new Map();
 
+// PDF bytes captured while the tab loaded them, keyed by tab id
+// ({url, bytes}). Publishers like ScienceDirect serve PDFs from
+// pre-signed URLs that expire within minutes and cannot be fetched a
+// second time, so saving must reuse the bytes from the original load.
+// This cache is why the background page is persistent: an event page
+// would drop it on suspend.
+const capturedByTab = new Map();
+
+// Keep at most this much captured PDF data across all tabs; oldest
+// captures are evicted first. A single PDF larger than the per-file
+// cap is not captured at all (saving falls back to re-fetching).
+const CAPTURE_TOTAL_LIMIT = 200 * 1024 * 1024;
+const CAPTURE_FILE_LIMIT = 100 * 1024 * 1024;
+
 const NATIVE_HOST = "io.github.pemsley.alexandria";
 const ICON_ACTIVE = "icons/alexandria-32.png";
 const ICON_INACTIVE = "icons/alexandria-32-grey.png";
@@ -46,17 +60,70 @@ browser.runtime.onMessage.addListener((msg, sender) => {
 
 browser.tabs.onRemoved.addListener((tabId) => {
   candidatesByTab.delete(tabId);
+  capturedByTab.delete(tabId);
 });
+
+function storeCapture(tabId, url, bytes) {
+  capturedByTab.delete(tabId); // re-insert so Map order tracks recency
+  capturedByTab.set(tabId, { url, bytes });
+  let total = 0;
+  for (const { bytes: b } of capturedByTab.values()) total += b.length;
+  for (const key of capturedByTab.keys()) {
+    if (total <= CAPTURE_TOTAL_LIMIT || key === tabId) break;
+    total -= capturedByTab.get(key).bytes.length;
+    capturedByTab.delete(key);
+  }
+}
+
+// Capture PDF bytes as the tab loads them. filterResponseData() must be
+// attached in onBeforeRequest, before the content type is known, so we
+// gate on urlLooksLikePdf() and verify the %PDF magic once loaded.
+browser.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.tabId < 0 || !urlLooksLikePdf(details.url)) return;
+    const filter = browser.webRequest.filterResponseData(details.requestId);
+    const chunks = [];
+    let size = 0;
+    filter.ondata = (event) => {
+      filter.write(event.data); // always pass through to the page
+      if (size < 0) return; // over the cap; stop accumulating
+      size += event.data.byteLength;
+      if (size > CAPTURE_FILE_LIMIT) {
+        chunks.length = 0;
+        size = -1;
+        return;
+      }
+      chunks.push(new Uint8Array(event.data));
+    };
+    filter.onstop = () => {
+      filter.close();
+      if (size <= 0) return;
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const c of chunks) {
+        bytes.set(c, offset);
+        offset += c.length;
+      }
+      // A login or error page served on a .pdf URL is not a PDF.
+      const magic = String.fromCharCode(...bytes.subarray(0, 5));
+      if (magic !== "%PDF-") return;
+      storeCapture(details.tabId, details.url, bytes);
+      maybeMarkTabAsPdf(details.tabId, details.url);
+    };
+    filter.onerror = () => {
+      chunks.length = 0;
+    };
+  },
+  { urls: ["<all_urls>"], types: ["main_frame", "sub_frame"] },
+  ["blocking"],
+);
 
 // PDF.js renders PDFs in a privileged chrome page where our content script
 // does not run, so we'd never get a `candidates` message for direct PDF URLs
 // or for publisher endpoints (Wiley pdfdirect, Silverchair article-pdf, IUCr
-// .pdf links, etc.) that serve `application/pdf`. Detect those by URL pattern
-// from the background, using the same matcher the content script uses.
-function urlLooksLikePdf(url) {
-  return AlexandriaPdf.looksLikePdfUrl(url);
-}
-
+// .pdf links, etc.) that serve `application/pdf`. Detect those by tab-URL
+// pattern from the background, using urlLooksLikePdf() (pdf-url.js), the
+// same matcher the content script uses.
 function maybeMarkTabAsPdf(tabId, url) {
   if (!urlLooksLikePdf(url)) return;
   // Don't clobber a richer list reported by the content script.
@@ -84,13 +151,10 @@ browser.tabs.onActivated.addListener(async ({ tabId }) => {
   } catch (_) { /* tab gone */ }
 });
 
-// This is a non-persistent background page, so `candidatesByTab` is lost
-// every time Firefox unloads us for being idle -- which, on a page you spend
-// a few minutes reading, is most of the time you might click the button. The
-// per-tab icon and popup settings are held by the browser and survive, so the
-// button still looks armed while our side of the state has gone. Ask the
-// content script, which is still alive in the page, rather than concluding
-// the page has no PDF.
+// `candidatesByTab` can be empty for a tab that does have a PDF: the add-on
+// was reloaded after the page loaded, or the page was open before the add-on
+// was. Ask the content script, which may still be alive in the page, rather
+// than concluding the page has no PDF.
 async function candidatesFor(tabId) {
   const cached = candidatesByTab.get(tabId) || [];
   if (cached.length > 0) return cached;
@@ -100,7 +164,7 @@ async function candidatesFor(tabId) {
     // loaded have no content script -- the usual case when running this as a
     // temporary add-on from about:debugging -- so inject one and ask again.
     try {
-      await browser.tabs.executeScript(tabId, { file: "pdf-urls.js" });
+      await browser.tabs.executeScript(tabId, { file: "pdf-url.js" });
       await browser.tabs.executeScript(tabId, { file: "content.js" });
       urls = await askTab(tabId);
     } catch (_) {
@@ -159,7 +223,7 @@ async function saveWithProgress(url, tabId, knownUrls) {
   const restoreTo = knownUrls || candidatesByTab.get(tabId) || [];
   const indicator = tabId == null ? null : progressIndicator(tabId);
   try {
-    const path = await saveUrl(url, (p) => {
+    const path = await saveUrl(url, tabId, (p) => {
       if (indicator) indicator.update(p);
       // The popup shows the same progress; it may not be open.
       browser.runtime
@@ -242,10 +306,11 @@ function humanBytes(n) {
   return `${n}B`;
 }
 
-async function fetchPdf(url) {
+// `hint` is appended to any error, to say why this URL might have failed.
+async function fetchPdf(url, hint = "") {
   const resp = await fetch(url, { credentials: "include" });
   if (!resp.ok) {
-    throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
+    throw new Error(`fetch failed: ${resp.status} ${resp.statusText}${hint}`);
   }
   const ctype = (resp.headers.get("content-type") || "").toLowerCase();
   const ok =
@@ -254,7 +319,7 @@ async function fetchPdf(url) {
     ctype.includes("application/octet-stream") ||
     isHtmlType(ctype);
   if (!ok) {
-    throw new Error(`server returned ${ctype}, not a PDF`);
+    throw new Error(`server returned ${ctype}, not a PDF${hint}`);
   }
   return resp;
 }
@@ -283,7 +348,7 @@ function embeddedPdfUrl(html, baseUrl) {
       /* skip malformed */
     }
   });
-  const known = sources.find((u) => AlexandriaPdf.looksLikePdfUrl(u));
+  const known = sources.find((u) => urlLooksLikePdf(u));
   if (known) return known;
   return sources.length === 1 ? sources[0] : null;
 }
@@ -293,8 +358,11 @@ function embeddedPdfUrl(html, baseUrl) {
 // a generic "main.pdf" that would collide across every Elsevier paper. A query
 // parameter ending in .pdf is usually the publisher's own name for the file
 // (ScienceDirect passes `pid=1-s2.0-S0021925817473893-main.pdf`).
+//
+// `resp` is null for bytes captured as the tab loaded, where we have only
+// the URL to go on.
 function filenameFor(resp, url) {
-  const cd = resp.headers.get("content-disposition") || "";
+  const cd = (resp && resp.headers.get("content-disposition")) || "";
   const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(cd);
   const plain = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/.exec(cd);
   let name = null;
@@ -315,7 +383,8 @@ function filenameFor(resp, url) {
   }
   // `resp.url` is where we ended up after any redirects, which is more likely
   // to name the file than the endpoint we asked for.
-  const final = resp.url && resp.url !== url ? basenameFromUrl(resp.url) : null;
+  const final =
+    resp && resp.url && resp.url !== url ? basenameFromUrl(resp.url) : null;
   if (final && final !== "download.pdf") return final;
   return basenameFromUrl(url);
 }
@@ -344,8 +413,49 @@ function basenameFromUrl(url) {
   }
 }
 
-async function saveUrl(url, onProgress) {
-  let resp = await fetchPdf(url);
+// Firefox 74+ forbids extensions from fetching file:// URLs, and the
+// native host is sandboxed away from ~/Downloads. So for a local PDF we
+// look up the download record that produced it and re-fetch the original
+// https URL (usually served straight from the browser cache).
+async function resolveFileUrl(fileUrl) {
+  const path = decodeURIComponent(new URL(fileUrl).pathname);
+  const items = await browser.downloads.search({ exists: true });
+  const matches = items.filter((d) => d.filename === path);
+  if (matches.length === 0) {
+    throw new Error(
+      "cannot read local files directly and no download record matches " +
+        path,
+    );
+  }
+  matches.sort((a, b) => (a.startTime < b.startTime ? 1 : -1));
+  return matches[0].finalUrl || matches[0].url;
+}
+
+// Pre-signed URLs (ScienceDirect etc.) expire minutes after they are
+// minted; re-fetching one past its window returns an HTML error page.
+function urlIsPresigned(url) {
+  return /[?&]X-Amz-(Signature|Expires)=/i.test(url);
+}
+
+async function saveUrl(url, tabId, onProgress) {
+  // Prefer the bytes captured while the tab loaded this PDF: no second
+  // download, and the only thing that works for expiring pre-signed URLs.
+  const captured = tabId != null && capturedByTab.get(tabId);
+  if (captured && captured.url === url) {
+    const n = captured.bytes.length;
+    if (onProgress) onProgress({ phase: "saving", received: n, total: n });
+    return sendToConnector(captured.bytes, filenameFor(null, url));
+  }
+
+  if (new URL(url).protocol === "file:") {
+    url = await resolveFileUrl(url);
+  }
+  // e.g. a tab opened directly on Wiley's /doi/pdf/ HTML wrapper.
+  url = canonicalPdfUrl(url);
+  const expiredHint = urlIsPresigned(url)
+    ? " (this publisher's PDF links expire after a few minutes — reload the PDF page and click Save again)"
+    : "";
+  let resp = await fetchPdf(url, expiredHint);
   // Some publishers hand back a viewer page rather than the file: IEEE
   // Xplore's stamp.jsp is an HTML shell whose <iframe> holds the real PDF.
   // Follow that one level before giving up.
@@ -353,8 +463,9 @@ async function saveUrl(url, onProgress) {
     const inner = await embeddedPdfUrl(await resp.text(), resp.url || url);
     if (!inner) {
       throw new Error(
-        "server returned HTML, not a PDF (an anti-bot challenge page, or a " +
-          "viewer we could not see into)",
+        "server returned HTML, not a PDF" +
+          (expiredHint ||
+            " (an anti-bot challenge page, or a viewer we could not see into)"),
       );
     }
     resp = await fetchPdf(inner);
@@ -369,13 +480,14 @@ async function saveUrl(url, onProgress) {
   if (onProgress) {
     onProgress({ phase: "saving", received: bytes.length, total });
   }
-  const dataB64 = bytesToBase64(bytes);
-  const filename = filenameFor(resp, url);
+  return sendToConnector(bytes, filenameFor(resp, url));
+}
 
+async function sendToConnector(bytes, filename) {
   const reply = await browser.runtime.sendNativeMessage(NATIVE_HOST, {
     action: "save",
     filename,
-    data_b64: dataB64,
+    data_b64: bytesToBase64(bytes),
   });
   if (!reply || !reply.ok) {
     throw new Error((reply && reply.error) || "connector returned no reply");
