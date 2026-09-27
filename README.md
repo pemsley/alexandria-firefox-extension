@@ -1,6 +1,6 @@
 
-A Firefox connector for Alexandria
+# A Firefox connector for Alexandria
 
-Install
+## Install
 
-   url: about:debuggging -> This Firefox -> Load Temporary Add on... -> manifest.json
+   URL: about:debugging → This Firefox → Load Temporary Add on... → manifest.json
