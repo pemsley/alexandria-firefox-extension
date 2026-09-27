@@ -27,3 +27,26 @@ function urlLooksLikePdf(url) {
     return false;
   }
 }
+
+// Map a publisher URL that is *about* a PDF but serves HTML onto the URL
+// that serves the PDF bytes. Anything not recognised comes back unchanged.
+//
+// Wiley: citation_pdf_url is /doi/pdf/DOI, which is an HTML wrapper
+// around the /doi/epdf/DOI reader; the reader's own Download button
+// fetches /doi/pdfdirect/DOI?download=true. Society journals live on
+// subdomains such as febs.onlinelibrary.wiley.com.
+function canonicalPdfUrl(url) {
+  try {
+    const u = new URL(url);
+    const wiley =
+      u.hostname === "onlinelibrary.wiley.com" ||
+      u.hostname.endsWith(".onlinelibrary.wiley.com");
+    const m = u.pathname.match(/^\/doi\/e?pdf\/(.+)$/);
+    if (wiley && m) {
+      return `${u.origin}/doi/pdfdirect/${m[1]}?download=true`;
+    }
+    return url;
+  } catch (_) {
+    return url;
+  }
+}

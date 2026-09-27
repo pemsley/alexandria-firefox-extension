@@ -56,6 +56,7 @@ After loading the extension, verify each row:
 | Downloaded PDF opened as `file://` from Downloads  | Button active; click re-fetches and saves |
 | Paywalled article on a logged-in publisher domain  | PDF downloads using session cookies       |
 | ScienceDirect PDF (expiring pre-signed URL), saved >5 min after load | Click saves from captured bytes |
+| Wiley article or ePDF reader (`onlinelibrary.wiley.com/doi/{,epdf/}10.1002/pro.3943`) | Button active; click saves via `/doi/pdfdirect/` |
 
 After each successful save, check that the file appears under
 `library_dir`. Run `alexandria-import` to ingest it as usual.

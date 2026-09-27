@@ -211,6 +211,8 @@ async function saveUrl(url, tabId) {
   if (new URL(url).protocol === "file:") {
     url = await resolveFileUrl(url);
   }
+  // e.g. a tab opened directly on Wiley's /doi/pdf/ HTML wrapper.
+  url = canonicalPdfUrl(url);
   const expiredHint = urlIsPresigned(url)
     ? " (this publisher's PDF links expire after a few minutes — reload the PDF page and click Save again)"
     : "";

@@ -5,6 +5,9 @@
 //   3. <a href> links that look like a PDF per urlLooksLikePdf()
 //      (pdf-url.js, loaded before this file): .pdf suffix or a known
 //      publisher PDF endpoint such as Science/ACS /doi/pdf/.
+// Sources 1 and 3 go through canonicalPdfUrl() (also pdf-url.js) first,
+// so publisher URLs that serve an HTML wrapper or reader (Wiley /doi/pdf/,
+// /doi/epdf/) become the URL that serves the PDF itself.
 //
 // We only collect URLs. Fetching, auth, and storage live in the
 // background script and the native messaging host respectively.
@@ -16,7 +19,7 @@
       .querySelectorAll('meta[name="citation_pdf_url"]')
       .forEach((m) => {
         const v = (m.getAttribute("content") || "").trim();
-        if (v) urls.push(v);
+        if (v) urls.push(canonicalPdfUrl(v));
       });
     return urls;
   }
@@ -37,7 +40,7 @@
       const href = a.getAttribute("href") || "";
       let abs;
       try {
-        abs = new URL(href, document.baseURI);
+        abs = new URL(canonicalPdfUrl(new URL(href, document.baseURI).toString()));
       } catch (_) {
         return; /* skip malformed */
       }
